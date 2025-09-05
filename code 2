@@ -1,0 +1,93 @@
+from  sklearn.model_selection import train_test_split
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from tensorflow.keras.applications import MobileNetV2
+import tensorflow.keras.backend as K
+
+# ------- Custom combined loss (weighted BCE + Dice) -------
+
+def dice_coef(y_true, y_pred, smooth=1):
+    y_true_f = K.flatten(y_true)
+    y_pred_f = K.flatten(y_pred)
+    intersection = K.sum(y_true_f * y_pred_f)
+    return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
+
+def combined_loss(y_true, y_pred):
+    weights = y_true * 5 + (1 - y_true) * 1  # foreground weighted 5x more
+    bce = K.binary_crossentropy(y_true, y_pred)
+    weighted_bce = K.mean(bce * weights)
+    dice_loss = 1 - dice_coef(y_true, y_pred)
+    return weighted_bce + dice_loss
+
+# ----------------- Data split -----------------
+
+X_train, X_val, Y_train, Y_val = train_test_split(
+    X, Y, test_size=0.2, random_state=42)
+
+# ----------------- Stronger Data Augmentation -----------------
+aug_args = dict(
+    rotation_range=45,
+    width_shift_range=0.15,
+    height_shift_range=0.15,
+    zoom_range=0.15,
+    shear_range=0.1,
+    brightness_range=[0.8, 1.2],
+    horizontal_flip=True,
+    fill_mode='nearest'
+)
+
+img_datagen = ImageDataGenerator(**aug_args)
+mask_datagen = ImageDataGenerator(**aug_args)
+seed = 42
+
+img_datagen.fit(X_train, augment=True, seed=seed)
+mask_datagen.fit(Y_train, augment=True, seed=seed)
+
+train_img_gen = img_datagen.flow(X_train, batch_size=8, seed=seed)
+train_mask_gen = mask_datagen.flow(Y_train, batch_size=8, seed=seed)
+
+def combined_generator(img_gen, mask_gen):
+    while True:
+        yield next(img_gen), next(mask_gen)
+
+train_gen = combined_generator(train_img_gen, train_mask_gen)
+
+# ---------------- U-Net with MobileNetV2 Encoder ----------------
+base = MobileNetV2(input_shape=(256, 256, 3), include_top=False, weights=None)
+skip_layers = ['block_1_expand_relu', 'block_3_expand_relu',
+               'block_6_expand_relu', 'block_13_expand_relu']
+skips = [base.get_layer(name).output for name in skip_layers]
+encoder = models.Model(inputs=base.input, outputs=skips)
+encoder.trainable = True
+
+def build_unet():
+    inputs = layers.Input((256, 256, 3))
+    enc_outs = encoder(inputs)
+    x = enc_outs[-1]
+    for filters, skip in zip([512, 256, 128, 64], reversed(enc_outs[:-1])):
+        x = layers.Conv2DTranspose(filters, 3, strides=2, padding='same')(x)
+        x = layers.Concatenate()([x, skip])
+        x = layers.Conv2D(filters, 3, activation='relu', padding='same')(x)
+        x = layers.Conv2D(filters, 3, activation='relu', padding='same')(x)
+    # Final upsampling to get 256x256 output
+    x = layers.Conv2DTranspose(32, 3, strides=2, padding='same')(x)
+    x = layers.Conv2D(32, 3, activation='relu', padding='same')(x)
+    x = layers.Conv2D(32, 3, activation='relu', padding='same')(x)
+
+    outputs = layers.Conv2D(1, 1, activation='sigmoid')(x)
+    return models.Model(inputs, outputs)
+
+model = build_unet()
+model.compile(optimizer='adam', loss=combined_loss, metrics=[dice_coef])
+
+# -------------- Training Setup --------------
+steps = len(X_train) // 8
+epochs = 10  # Reduced epochs due to time constraints (~3 hrs max training)
+
+history = model.fit(
+    train_gen,
+    validation_data=(X_val, Y_val),
+    steps_per_epoch=steps,
+    epochs=epochs
+)
