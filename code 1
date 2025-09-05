@@ -1,0 +1,91 @@
+import  numpy as np
+import os
+from glob import glob
+from PIL import Image
+
+# Define dataset root paths based on your screenshots:
+roots = {
+    'mp': {
+        'img': '/kaggle/input/mpset-microplastic-dataset/archive/clam/clam/clam_fl/',
+        'mask': '/kaggle/input/mpset-microplastic-dataset/archive/clam/clam/clam_mask/'
+    },
+    'nr': {
+        'img': '/kaggle/input/microplastics-nilered-fluoroscence/Nile-red images/original_size/',
+        'mask': '/kaggle/input/microplastics-nilered-fluoroscence/Nile-red images/annotations/'
+    },
+    'hd': {
+        'img': '/kaggle/input/harvard-microplastic-segmentation/dataverse_files/base/',
+        'mask': '/kaggle/input/harvard-microplastic-segmentation/dataverse_files/masks/'
+    }
+}
+
+all_images = []
+all_masks = []
+
+# Collect MP-Set images and masks
+all_images.extend(sorted(glob(os.path.join(roots['mp']['img'], '.'))))
+all_masks.extend(sorted(glob(os.path.join(roots['mp']['mask'], '.'))))
+
+# Collect Nile Red images
+all_images.extend(sorted(glob(os.path.join(roots['nr']['img'], '.'))))
+
+# Collect Nile Red masks recursively from all 3 subfolders inside annotations
+for root, _, files in os.walk(roots['nr']['mask']):
+    for f in files:
+        if f.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff')):
+            all_masks.append(os.path.join(root, f))
+
+# Collect Harvard images and masks
+all_images.extend(sorted(glob(os.path.join(roots['hd']['img'], '.'))))
+all_masks.extend(sorted(glob(os.path.join(roots['hd']['mask'], '.'))))
+
+print(f"Total images found: {len(all_images)}")
+print(f"Total masks found: {len(all_masks)}")
+
+# Build mask dictionary for lookup (remove '-1' suffix in mask names for Harvard)
+mask_dict = {}
+for m in all_masks:
+    key = os.path.splitext(os.path.basename(m))[0]
+    if key.endswith('-1'):
+        key = key.rsplit('-', 1)[0]
+    mask_dict[key] = m
+
+# Match images and masks based on basename
+image_paths = []
+mask_paths = []
+for img in all_images:
+    base = os.path.splitext(os.path.basename(img))[0]
+    if base in mask_dict:
+        image_paths.append(img)
+        mask_paths.append(mask_dict[base])
+
+print(f"Matched image-mask pairs: {len(image_paths)}")  # Expect around 390+
+
+# Preprocess images and masks (resize to 256x256, normalize)
+IMG_SIZE = 256
+
+def preprocess_pair(img_path, mask_path):
+    img = Image.open(img_path).resize((IMG_SIZE, IMG_SIZE))
+    mask = Image.open(mask_path).resize((IMG_SIZE, IMG_SIZE))
+    img_array = np.array(img)
+    if img_array.ndim == 2:
+        img_array = np.stack((img_array,) * 3, axis=-1)
+    elif img_array.shape[2] == 4:
+        img_array = img_array[:, :, :3]
+    img_array = img_array / 255.0
+    mask_array = (np.array(mask) > 127).astype(np.float32)[..., np.newaxis]
+    return img_array, mask_array
+
+X = []
+Y = []
+for i, (img_path, mask_path) in enumerate(zip(image_paths, mask_paths)):
+    xi, yi = preprocess_pair(img_path, mask_path)
+    X.append(xi)
+    Y.append(yi)
+    if i % 50 == 0:
+        print(f"Preprocessed {i}/{len(image_paths)}")
+
+X = np.array(X)
+Y = np.array(Y)
+
+print(f"Final shapes: X={X.shape}, Y={Y.shape}")
