@@ -1,0 +1,48 @@
+% Read and preprocess image
+I = imread('C:\Users\ASUS\OneDrive\Desktop\SIH\MP_image.jpg');
+Igray = rgb2gray(I);
+
+% Gradient magnitude for edge input
+[Gx, Gy] = imgradientxy(Igray);
+gradMag = sqrt(Gx.^2 + Gy.^2);
+gradNorm = mat2gray(gradMag);
+
+% Fuzzy system setup (1 input, 1 output)
+fis = mamfis('Name','EdgeDetection');
+fis = addInput(fis,[0 1],'Name','Gradient');
+fis = addMF(fis,'Gradient','trapmf',[0 0 0.2 0.4],'Name','Low');
+fis = addMF(fis,'Gradient','trimf',[0.3 0.5 0.7],'Name','Medium');
+fis = addMF(fis,'Gradient','trapmf',[0.6 0.8 1 1],'Name','High');
+fis = addOutput(fis,[0 1],'Name','EdgeStrength');
+fis = addMF(fis,'EdgeStrength','trimf',[0 0 0.5],'Name','Weak');
+fis = addMF(fis,'EdgeStrength','trimf',[0.3 0.6 0.9],'Name','Moderate');
+fis = addMF(fis,'EdgeStrength','trimf',[0.5 1 1],'Name','Strong');
+fis = addRule(fis,[1 1 1 1]); % Low -> Weak
+fis = addRule(fis,[2 2 1 1]); % Medium -> Moderate
+fis = addRule(fis,[3 3 1 1]); % High -> Strong
+
+% Fuzzy evaluation
+inputVals = gradNorm(:);
+edgeFuzzyVals = evalfis(fis, inputVals);
+edgeFuzzy = reshape(edgeFuzzyVals,size(gradNorm));
+
+% More sensitive threshold
+edgeMap = edgeFuzzy > 0.3;
+
+% Post-processing
+bw = imbinarize(Igray,'adaptive','Sensitivity',0.5);
+bw = bw | edgeMap; % Combine both
+bw = bwareaopen(bw,10); % Keep small objects
+bw = imclose(bw,strel('disk',2));
+bw = imfill(bw,'holes');
+
+% Detect objects
+stats = regionprops(bw,'Area','Centroid','EquivDiameter');
+numObjects = numel(stats);
+
+% Display
+imshow(I); hold on;
+for k=1:numObjects
+    viscircles(stats(k).Centroid, stats(k).EquivDiameter/2,'Color','r');
+end
+title(['Detected Microplastics: ', num2str(numObjects)]);
